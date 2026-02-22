@@ -57,8 +57,15 @@ python3 scan.py --path ./path/to/skill/
 # Deep scan (includes scripts)
 python3 scan.py --path ./path/to/skill/ --deep
 
+# 🤖 AI deep analysis (finds what regex can't)
+export ANTHROPIC_API_KEY=sk-ant-...
+python3 scan.py --path ./path/to/skill/ --ai
+
 # Audit all your installed skills
 python3 scan.py --audit ~/.openclaw/skills
+
+# Export threat intelligence database
+python3 scan.py --audit ~/.openclaw/skills --export-threats threats.json
 
 # JSON output for CI/CD
 python3 scan.py --path ./path/to/skill/ --json
@@ -109,21 +116,73 @@ python3 scan.py --path ./path/to/skill/ --json
 
 ## How It Works
 
-VettAI is a static analysis tool. It reads skill files — it never executes them.
+VettAI has two scanning modes that work together:
+
+### 🔍 Static Analysis (default)
+Pattern-based scanning with 25+ rules. Fast, offline, zero dependencies.
 
 1. **Parse** — Reads YAML frontmatter and markdown instructions from SKILL.md
 2. **Match** — Checks content against 25+ security rules using pattern matching
 3. **Score** — Calculates a 0–100 risk score weighted by finding severity
 4. **Report** — Outputs a clear, actionable report with specific line references
 
+### 🤖 AI Deep Analysis (`--ai`)
+Sends the skill to Claude for behavioral threat detection. Finds what regex can't:
+
+- **Intent analysis** — Understands *what the skill is trying to do*, not just pattern matches
+- **Attack chain detection** — Spots multi-step attacks where each step looks innocent
+- **Social engineering** — Catches "run this to fix a bug" that actually steals data
+- **Obfuscation** — Sees through encoding, indirection, and clever variable naming
+- **Subtle manipulation** — Detects instructions that slowly modify agent behavior
+
+```
+python3 scan.py --path ./suspicious-skill/ --ai
+
+  🤖 AI DEEP ANALYSIS (powered by Claude)
+  ══════════════════════════════════════════════════
+  Risk:       ⛔ MALICIOUS (confidence: 95%)
+  Summary:    Skill disguised as YouTube tool that steals credentials
+              and establishes C2 communication.
+
+  AI-detected threats (3):
+  ──────────────────────────────────────────────────
+    [CRITICAL] DATA EXFILTRATION
+      Sends .env file contents to known malicious IP
+      → This IP (91.92.242.30) is associated with ClawHavoc C2
+
+    [CRITICAL] SOCIAL ENGINEERING
+      "Install helper tool" actually pipes remote code to bash
+      → The glot.io URL serves a malware dropper
+
+    [HIGH] MEMORY POISONING
+      Instructs user to modify SOUL.md with permissive rules
+      → This disables the agent's safety checks for future attacks
+
+  💡 AI Recommendation: Do not install. Report this skill.
+```
+
+### 📦 Threat Intelligence Database (`--export-threats`)
+
+Scan thousands of skills and export a structured threat intelligence feed:
+
+```bash
+python3 scan.py --audit ~/.openclaw/skills --export-threats threats.json
+```
+
+The database includes:
+- Every dangerous skill with risk score and findings
+- Extracted IoCs (malicious IPs, domains, URLs)
+- Attack category breakdown (shell injection, exfil, memory poisoning...)
+- Ready for integration with SIEM systems and security dashboards
+
 ```
 Agent wants to install a skill
          │
          ▼
    ┌─────────────┐
-   │   VettAI     │──→ Parse SKILL.md + scripts
-   │   Scanner    │──→ Match against 25+ rules
-   │              │──→ Calculate risk score
+   │   VettAI     │──→ Static scan (25+ regex rules)
+   │   Scanner    │──→ AI analysis (behavioral intent)
+   │              │──→ Threat DB lookup (known bad skills)
    └──────┬──────┘
           │
     ┌─────┴─────┐
@@ -176,11 +235,13 @@ Every skill you install is code you're trusting with your digital life. VettAI i
 - [x] Static skill scanner with 25+ rules
 - [x] Workspace audit (scan all installed skills)
 - [x] JSON output for CI/CD integration
-- [ ] OpenClaw native skill integration
+- [x] AI deep analysis with Claude (`--ai`)
+- [x] Threat intelligence database export (`--export-threats`)
+- [ ] OpenClaw pre-install hook (auto-scan before install)
 - [ ] GitHub Action
 - [ ] Runtime policy engine
 - [ ] `npx vettai scan` (npm package)
-- [ ] Web dashboard
+- [ ] Web dashboard with threat feed
 - [ ] Enterprise features (SSO, SIEM, compliance)
 
 ---

@@ -2,12 +2,15 @@
 """
 VettAI - Security Scanner for AI Agent Skills
 Scans SKILL.md and associated files for malicious patterns.
+Uses optional AI analysis for deep behavioral threat detection.
 
 Usage:
     python3 scan.py --path ./some-skill/
     python3 scan.py --path ./some-skill/ --deep
+    python3 scan.py --path ./some-skill/ --ai
     python3 scan.py --path ./some-skill/ --json
     python3 scan.py --audit ~/Projects/my-openclaw-workspace
+    python3 scan.py --audit ./skills/ --export-threats threats.json
 """
 
 import argparse
@@ -17,6 +20,8 @@ import os
 import re
 import sys
 import time
+import urllib.request
+import urllib.error
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 from pathlib import Path
@@ -537,6 +542,259 @@ def format_terminal(result):
 
 
 # ─────────────────────────────────────────────
+# AI ANALYSIS ENGINE
+# ─────────────────────────────────────────────
+
+AI_SYSTEM_PROMPT = """You are VettAI, a security analyst specialized in AI agent skills.
+You analyze SKILL.md files for security threats. Be concise and specific.
+
+Evaluate the skill for these threat categories:
+1. DATA EXFILTRATION - Does it send local files, secrets, or credentials to external servers?
+2. REMOTE CODE EXECUTION - Does it download and execute code from the internet?
+3. MEMORY POISONING - Does it modify SOUL.md, MEMORY.md, or agent configuration?
+4. CREDENTIAL THEFT - Does it access SSH keys, .env files, wallets, or cloud credentials?
+5. PROMPT INJECTION - Does it try to override agent instructions or hide commands?
+6. SUPPLY CHAIN - Does it install suspicious packages or download unverified binaries?
+7. OBFUSCATION - Does it use encoding, unicode tricks, or indirection to hide intent?
+
+Also look for SUBTLE threats that regex cannot catch:
+- Innocent-looking instructions that chain together into an attack
+- Social engineering ("run this to fix a bug" that actually steals data)
+- Conditional logic that behaves differently in certain environments
+- Legitimate-looking URLs that are actually malicious
+
+Respond in this exact JSON format:
+{
+  "risk_level": "safe|low|suspicious|dangerous|malicious",
+  "confidence": 0.0-1.0,
+  "summary": "One sentence summary of the overall risk",
+  "threats": [
+    {
+      "category": "category name",
+      "severity": "critical|high|medium|low",
+      "description": "What the threat does",
+      "evidence": "The specific text/line that is suspicious",
+      "why_dangerous": "Why this is a real threat, not a false positive"
+    }
+  ],
+  "subtle_findings": "Any concerns that pure regex would miss",
+  "recommendation": "What the user should do"
+}"""
+
+
+def ai_analyze(content, api_key, model="claude-sonnet-4-20250514"):
+    """Send skill content to Claude API for deep behavioral analysis."""
+
+    request_body = json.dumps({
+        "model": model,
+        "max_tokens": 2000,
+        "messages": [
+            {"role": "user", "content": f"Analyze this SKILL.md file for security threats:\n\n```\n{content[:15000]}\n```"}
+        ],
+        "system": AI_SYSTEM_PROMPT,
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages",
+        data=request_body,
+        headers={
+            "Content-Type": "application/json",
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            text = data["content"][0]["text"]
+
+            # Extract JSON from response (handle markdown code blocks)
+            text = text.strip()
+            if text.startswith("```"):
+                text = text.split("\n", 1)[1]
+                if text.endswith("```"):
+                    text = text[:-3]
+            text = text.strip()
+
+            return json.loads(text)
+
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode("utf-8") if e.fp else ""
+        if e.code == 401:
+            return {"error": "Invalid API key. Check your ANTHROPIC_API_KEY."}
+        elif e.code == 429:
+            return {"error": "Rate limited. Wait a moment and try again."}
+        else:
+            return {"error": f"API error {e.code}: {error_body[:200]}"}
+    except urllib.error.URLError as e:
+        return {"error": f"Network error: {e.reason}"}
+    except json.JSONDecodeError:
+        return {"error": "Could not parse AI response as JSON."}
+    except Exception as e:
+        return {"error": f"Unexpected error: {str(e)}"}
+
+
+def format_ai_report(ai_result):
+    """Format AI analysis results for terminal output."""
+    lines = []
+
+    if "error" in ai_result:
+        lines.append(f"\n  ⚠️  AI Analysis Error: {ai_result['error']}")
+        return "\n".join(lines)
+
+    risk = ai_result.get("risk_level", "unknown")
+    confidence = ai_result.get("confidence", 0)
+    summary = ai_result.get("summary", "No summary available.")
+
+    risk_icons = {
+        "safe": "✅", "low": "🟡", "suspicious": "🟠",
+        "dangerous": "🔴", "malicious": "⛔",
+    }
+    icon = risk_icons.get(risk, "❓")
+
+    lines.append("")
+    lines.append("  🤖 AI DEEP ANALYSIS (powered by Claude)")
+    lines.append("  " + "═" * 46)
+    lines.append(f"  Risk:       {icon} {risk.upper()} (confidence: {confidence:.0%})")
+    lines.append(f"  Summary:    {summary}")
+
+    threats = ai_result.get("threats", [])
+    if threats:
+        lines.append("")
+        lines.append(f"  AI-detected threats ({len(threats)}):")
+        lines.append("  " + "-" * 46)
+        for t in threats:
+            sev = t.get("severity", "medium").upper()
+            cat = t.get("category", "unknown")
+            desc = t.get("description", "")
+            why = t.get("why_dangerous", "")
+            lines.append(f"    [{sev}] {cat}")
+            lines.append(f"      {desc}")
+            if why:
+                lines.append(f"      → {why}")
+            lines.append("")
+
+    subtle = ai_result.get("subtle_findings", "")
+    if subtle and subtle.lower() not in ("none", "n/a", "none found", ""):
+        lines.append("  🔎 Subtle findings (regex would miss):")
+        lines.append(f"     {subtle}")
+        lines.append("")
+
+    rec = ai_result.get("recommendation", "")
+    if rec:
+        lines.append(f"  💡 AI Recommendation: {rec}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+# ─────────────────────────────────────────────
+# THREAT DATABASE
+# ─────────────────────────────────────────────
+
+def export_threat_database(results, output_path):
+    """Export dangerous skills as a threat intelligence database."""
+    threats = []
+
+    for r in results:
+        if r.risk_score < 20:
+            continue
+
+        threat_entry = {
+            "skill_name": str(r.skill_name),
+            "skill_path": r.skill_path,
+            "risk_score": r.risk_score,
+            "verdict": r.verdict,
+            "scan_date": time.strftime("%Y-%m-%d"),
+            "finding_count": len(r.findings),
+            "categories": list(set(
+                f.rule_id.split("-")[0] for f in r.findings
+            )),
+            "rule_ids": list(set(f.rule_id for f in r.findings)),
+            "critical_count": sum(
+                1 for f in r.findings if f.severity == Severity.CRITICAL
+            ),
+            "high_count": sum(
+                1 for f in r.findings if f.severity == Severity.HIGH
+            ),
+            "indicators": [],
+            "findings": [],
+        }
+
+        # Extract indicators of compromise (IoCs)
+        for f in r.findings:
+            # Extract IPs
+            ips = re.findall(r"\d+\.\d+\.\d+\.\d+", f.match)
+            for ip in ips:
+                if ip not in [i["value"] for i in threat_entry["indicators"]]:
+                    threat_entry["indicators"].append({
+                        "type": "ip", "value": ip
+                    })
+
+            # Extract domains (exclude common file extensions)
+            domains = re.findall(
+                r"(?:https?://)?([a-z0-9][-a-z0-9]*\.(?:com|net|org|io|dev|ai|co|app|xyz|sh))",
+                f.match, re.I
+            )
+            for d in domains:
+                if d not in [i["value"] for i in threat_entry["indicators"]]:
+                    threat_entry["indicators"].append({
+                        "type": "domain", "value": d
+                    })
+
+            threat_entry["findings"].append({
+                "rule_id": f.rule_id,
+                "severity": f.severity.value,
+                "name": f.name,
+                "file": f.file,
+                "line": f.line,
+                "match": f.match,
+            })
+
+        threats.append(threat_entry)
+
+    # Sort by risk score (most dangerous first)
+    threats.sort(key=lambda x: x["risk_score"], reverse=True)
+
+    # Build database
+    db = {
+        "vettai_version": "0.1.0",
+        "generated": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "total_scanned": len(results),
+        "total_threats": len(threats),
+        "summary": {
+            "malicious": sum(1 for t in threats if t["risk_score"] >= 80),
+            "dangerous": sum(1 for t in threats if 50 <= t["risk_score"] < 80),
+            "suspicious": sum(1 for t in threats if 20 <= t["risk_score"] < 50),
+        },
+        "top_iocs": _extract_top_iocs(threats),
+        "threats": threats,
+    }
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(db, f, indent=2, ensure_ascii=False)
+
+    return db
+
+
+def _extract_top_iocs(threats):
+    """Extract and rank indicators of compromise across all threats."""
+    from collections import Counter
+    ioc_counter = Counter()
+
+    for t in threats:
+        for ioc in t["indicators"]:
+            ioc_counter[f"{ioc['type']}:{ioc['value']}"] += 1
+
+    return [
+        {"type": k.split(":")[0], "value": k.split(":", 1)[1], "seen_in": v}
+        for k, v in ioc_counter.most_common(50)
+    ]
+
+
+# ─────────────────────────────────────────────
 # WORKSPACE AUDIT
 # ─────────────────────────────────────────────
 
@@ -632,15 +890,23 @@ def main():
 Examples:
   python3 scan.py --path ./my-skill/           Scan a single skill
   python3 scan.py --path ./my-skill/ --deep    Scan skill + all scripts
+  python3 scan.py --path ./my-skill/ --ai      Scan + AI deep analysis
+  python3 scan.py --path ./my-skill/ --smart   Regex first, AI only if suspicious
   python3 scan.py --path ./my-skill/ --json    Output as JSON
   python3 scan.py --audit ~/.openclaw/skills   Audit all installed skills
+  python3 scan.py --audit ./skills/ --export-threats threats.json
+  python3 scan.py --audit ./skills/ --smart    Smart audit with AI for risky skills
         """,
     )
 
     parser.add_argument("--path", help="Path to a skill folder (must contain SKILL.md)")
     parser.add_argument("--audit", help="Audit all skills in a workspace/folder")
     parser.add_argument("--deep", action="store_true", help="Also scan scripts and reference files")
+    parser.add_argument("--ai", action="store_true", help="Enable AI deep analysis (requires ANTHROPIC_API_KEY)")
+    parser.add_argument("--smart", action="store_true",
+                        help="Smart mode: regex first, AI only for suspicious+ skills (saves cost)")
     parser.add_argument("--json", action="store_true", help="Output results as JSON")
+    parser.add_argument("--export-threats", metavar="FILE", help="Export threat database to JSON file")
     parser.add_argument("--version", action="version", version="VettAI 0.1.0")
 
     args = parser.parse_args()
@@ -649,8 +915,52 @@ Examples:
         parser.print_help()
         sys.exit(0)
 
+    # Check for API key if AI mode requested
+    api_key = None
+    if args.ai or args.smart:
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        if not api_key:
+            flag = "--smart" if args.smart else "--ai"
+            print(f"Error: {flag} requires ANTHROPIC_API_KEY environment variable.", file=sys.stderr)
+            print("  Get a key at: https://console.anthropic.com/settings/keys", file=sys.stderr)
+            print("  Then run: export ANTHROPIC_API_KEY=sk-ant-...", file=sys.stderr)
+            sys.exit(1)
+
     if args.audit:
         results = audit_workspace(args.audit, deep=args.deep, as_json=args.json)
+
+        # Smart audit: run AI only on suspicious+ skills
+        if args.smart and api_key:
+            risky = [r for r in results if r.risk_score >= 20]
+            if risky:
+                print(f"\n  🤖 Smart mode: AI analyzing {len(risky)} suspicious skills")
+                print(f"     (skipping {len(results) - len(risky)} safe skills — saving ~${(len(results) - len(risky)) * 0.02:.2f})")
+                print()
+                for i, r in enumerate(risky, 1):
+                    skill_md = Path(r.skill_path) / "SKILL.md"
+                    try:
+                        content = skill_md.read_text(encoding="utf-8")
+                        print(f"  [{i}/{len(risky)}] Analyzing {r.skill_name}...", end="", flush=True)
+                        ai_result = ai_analyze(content, api_key)
+                        print(" done.")
+                        if "error" not in ai_result:
+                            ai_risk = ai_result.get("risk_level", "unknown")
+                            ai_conf = ai_result.get("confidence", 0)
+                            threats = len(ai_result.get("threats", []))
+                            print(f"         AI: {ai_risk.upper()} ({ai_conf:.0%}) — {threats} threat(s)")
+                    except Exception as e:
+                        print(f" error: {e}")
+                print(f"\n  💰 Cost: ~${len(risky) * 0.02:.2f} ({len(risky)} AI scans)")
+                print(f"     Saved: ~${(len(results) - len(risky)) * 0.02:.2f} ({len(results) - len(risky)} skipped)")
+                print()
+
+        # Export threat database if requested
+        if args.export_threats:
+            db = export_threat_database(results, args.export_threats)
+            print(f"\n  📦 Threat database exported: {args.export_threats}")
+            print(f"     {db['total_threats']} threats, {len(db['top_iocs'])} IoCs")
+            print()
+
         worst = max((r.risk_score for r in results), default=0)
         sys.exit(1 if worst >= 50 else 0)
     else:
@@ -659,6 +969,29 @@ Examples:
         except FileNotFoundError as e:
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(1)
+
+        # AI analysis: always with --ai, only if suspicious with --smart
+        ai_result = None
+        run_ai = False
+        if args.ai and api_key:
+            run_ai = True
+        elif args.smart and api_key:
+            if result.risk_score >= 20:
+                run_ai = True
+            else:
+                if not args.json:
+                    print(f"  🤖 Smart mode: Score {result.risk_score} < 20 — AI analysis skipped (saving ~$0.02)")
+                    print()
+
+        if run_ai:
+            skill_md = Path(args.path) / "SKILL.md"
+            content = skill_md.read_text(encoding="utf-8")
+            if not args.json:
+                print("\n  🤖 Running AI analysis...", end="", flush=True)
+            ai_result = ai_analyze(content, api_key)
+            if not args.json:
+                print(" done.\n")
+
         if args.json:
             output = {
                 "skill_name": result.skill_name,
@@ -669,9 +1002,13 @@ Examples:
                 "scan_duration_ms": result.scan_duration_ms,
                 "findings": [f.to_dict() for f in result.findings],
             }
+            if ai_result:
+                output["ai_analysis"] = ai_result
             print(json.dumps(output, indent=2))
         else:
             print(format_terminal(result))
+            if ai_result:
+                print(format_ai_report(ai_result))
 
         sys.exit(1 if result.risk_score >= 50 else 0)
 

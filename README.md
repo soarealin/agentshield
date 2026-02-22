@@ -236,6 +236,38 @@ Every skill you install is code you're trusting with your digital life. VettAI i
 
 ---
 
+## OpenClaw Integration
+
+VettAI works as a native OpenClaw skill. Once installed, your agent automatically scans skills before installing them.
+
+**Install:**
+```bash
+# Copy VettAI to your skills directory
+cp -r vettai ~/.openclaw/skills/vettai
+
+# Or for a workspace-specific install
+cp -r vettai <workspace>/skills/vettai
+```
+
+**What happens next:**
+
+Your OpenClaw agent now knows to scan every third-party skill before installation. If a skill scores 80+, the agent refuses to install it. If it scores 50+, the agent warns you and asks for confirmation.
+
+```
+You:    Install the youtube-summarize skill from ClawHub
+Agent:  🔍 Scanning youtube-summarize with VettAI first...
+
+        ⛔ Risk Score: 97/100 — MALICIOUS
+
+        • [SHELL-001] Remote Code Execution — curl | bash from glot.io
+        • [EXFIL-001] Data Exfiltration — sends .env to external IP
+        • [CRED-001] SSH Key Access — reads ~/.ssh/id_rsa
+
+        🚫 I will NOT install this skill. It matches ClawHavoc malware patterns.
+```
+
+---
+
 ## Roadmap
 
 - [x] Static skill scanner with 25+ rules
@@ -245,7 +277,8 @@ Every skill you install is code you're trusting with your digital life. VettAI i
 - [x] Smart mode — AI only for suspicious skills (`--smart`)
 - [x] Dry run — preview costs before spending (`--dry-run`)
 - [x] Threat intelligence database export (`--export-threats`)
-- [ ] OpenClaw pre-install hook (auto-scan before install)
+- [x] OpenClaw native skill (install VettAI as an agent skill)
+- [ ] OpenClaw pre-install hook ([proposed](https://github.com/openclaw/openclaw/issues/XXXX) — auto-block malicious installs)
 - [ ] GitHub Action
 - [ ] Runtime policy engine
 - [ ] `npx vettai scan` (npm package)
